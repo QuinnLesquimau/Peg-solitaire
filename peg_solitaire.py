@@ -1,10 +1,9 @@
-# A peg solitaire, using oriented-object programming
 import math
 import pygame
 import cvxpy as cp
 import numpy as np
 
-
+# Defining the matrix describing the board
 N = 7 # size square
 width_cross = math.ceil(N/3)
 width_left_part = math.ceil((N - width_cross)/2)
@@ -17,13 +16,6 @@ standard_board[origin[1]][origin[0]] = 0
 standard_board[2][4] = 1
 standard_board[3][4] = 1
 
-"""winable_board = [x.copy() for x in standard_board]
-for y,row in enumerate(winable_board):
-    for x,cell in enumerate(row):
-        if cell == 1:
-            if not (x,y) in {(2,4),(3,1),(3,2),(3,3),(4,3),(5,3),(5,4)}:
-                winable_board[y][x] = 0
-    winable_board[3][3] = 1"""
 
 class PegBoard:
 
@@ -222,7 +214,119 @@ class PegBoard:
         print("Nay...")
         return False
 
-
+    def fast_compute_solution(self,screen,stop=None):
+        """Back-tracking algorithm, with verifications with pagoda functions
+        If it can prove that some position is not solvable by finding the
+        right pagoda function, and there are enough pieces left, then
+        it will go back two steps instead of just one. This means that
+        it can sometimes miss a solution.
+        """
+        computed_states = [set() for x in range(len(self.position_pieces))]
+        history_computation = [self.possible_moves()]
+        level = 0 # depth in the back-tracking algorithm
+        steps = [0]
+        count = 0
+        beginning_number_pieces = len(self.position_pieces)
+        playable_places = []
+        possible_moves = []
+        position_pieces = []
+        final_position = []
+        position_to_index = {} # Given a position (x,y) on the board, gives the index in the list possible_moves
+        for y in range(self.height):
+            for x in range(self.width):
+                square_type = self.get_square_type(x,y)
+                if square_type != -1:
+                    if square_type == 1:
+                        position_pieces.append(1)
+                    else:
+                        position_pieces.append(0)
+                    if (x,y) == self.goal:
+                        final_position.append(1)
+                    else:
+                        final_position.append(0)
+                    position_to_index.update({(x,y):len(playable_places)})
+                    playable_places.append((x,y))
+                    if self.is_on_board(x+2,y) and self.get_square_type(x+1,y) != -1 and self.get_square_type(x+2,y) != -1:
+                        possible_moves.append(((x,y),(x+1,y),(x+2,y)))
+                        possible_moves.append(((x+2,y),(x+1,y),(x,y)))
+                    if self.is_on_board(x,y+2) and self.get_square_type(x,y+1) != -1 and self.get_square_type(x,y+2) != -1:
+                        possible_moves.append(((x,y),(x,y+1),(x,y+2)))
+                        possible_moves.append(((x,y+2),(x,y+1),(x,y)))
+        n = len(playable_places)
+        x = cp.Variable(n)
+        matrix_relations = []
+        for move in possible_moves:
+            matrix_relations.append([1 if x == move[0] or x == move[1] else -1 if x == move[2] else 0 for x in playable_places])
+        array_relations = np.array(matrix_relations)
+        param_pos_pieces = cp.Parameter((n,),nonneg=True)
+        array_final_position = np.array(final_position)
+        restriction = [0 <= array_relations @ x]
+        objective = cp.Minimize(x @ param_pos_pieces - x @ array_final_position)
+        problem = cp.Problem(objective,restriction)
+        assert problem.is_dcp(dpp=True)
+        
+        while level >= 0:
+            count = (count + 1) %100
+            if count == 0:
+                if stop != None and stop():
+                    return False
+            pagoda_ok = True
+            if steps[level] == 0 and beginning_number_pieces//3 < level and beginning_number_pieces - level > 12:
+                param_pos_pieces.value = np.array(position_pieces)
+                if problem.solve() < -0.0001:
+                    pagoda_ok = False
+            if steps[level] < len(history_computation[level]) and pagoda_ok:
+                if steps[level] > 0 or not self.position_pieces in computed_states[level]:
+                    next_move = history_computation[level][steps[level]]
+                    self._play(next_move[0],next_move[1],True)
+                    pos0 = next_move[0]
+                    pos1 = next_move[1]
+                    pos2 = ((pos0[0] + pos1[0])//2,(pos0[1] + pos1[1])//2)
+                    position_pieces[position_to_index[pos0]] = 0
+                    position_pieces[position_to_index[pos1]] = 1
+                    position_pieces[position_to_index[pos2]] = 0
+                    level += 1
+                    steps[-1] += 1
+                    steps.append(0)
+                    history_computation.append(self.possible_moves())
+                    #draw_board(self,screen)
+                    #pygame.display.update()
+                else:
+                    steps = steps[:-1]
+                    history_computation = history_computation[:-1]
+                    level -= 1
+                    prev_move = history_computation[level][steps[level]-1]
+                    pos0 = prev_move[0]
+                    pos1 = prev_move[1]
+                    pos2 = ((pos0[0] + pos1[0])//2,(pos0[1] + pos1[1])//2)
+                    position_pieces[position_to_index[pos0]] = 1
+                    position_pieces[position_to_index[pos1]] = 0
+                    position_pieces[position_to_index[pos2]] = 1                    
+                    self.go_back()                            
+            else:
+                if len(history_computation[level]) == 0:
+                    if self.has_won():
+                        print("Yay!")
+                        return True
+                else:
+                    computed_states[level].add(frozenset(self.position_pieces))
+                m = 1 if pagoda_ok else 3
+                for i in range(m):
+                    if level > 0:
+                        steps = steps[:-1]
+                        history_computation = history_computation[:-1]
+                        level -= 1
+                        prev_move = history_computation[level][steps[level]-1]
+                        pos0 = prev_move[0]
+                        pos1 = prev_move[1]
+                        pos2 = ((pos0[0] + pos1[0])//2,(pos0[1] + pos1[1])//2)
+                        position_pieces[position_to_index[pos0]] = 1
+                        position_pieces[position_to_index[pos1]] = 0
+                        position_pieces[position_to_index[pos2]] = 1                 
+                        self.go_back()
+        self.go_forward()
+        print("Nay...")
+        return False
 
     def pagoda_fun_test(self):
         playable_places = []
@@ -262,10 +366,6 @@ class PegBoard:
         if problem.solve() < -0.0001:
             return False
         return True
-
-
-        
-
                 
 
 
@@ -356,6 +456,13 @@ if __name__ == '__main__':
                                 return True
                         return False
                     board.compute_solution(screen,stop)
+                if event.key == pygame.K_r:
+                    def stop():
+                        for eventt in pygame.event.get():
+                            if eventt.type == pygame.KEYDOWN and eventt.key == pygame.K_r:
+                                return True
+                        return False
+                    board.fast_compute_solution(screen,stop)
 
                 if event.key == pygame.K_t:
                     print(board.pagoda_fun_test())
